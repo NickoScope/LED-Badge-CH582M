@@ -259,6 +259,7 @@ async def main():
     #          чтобы правые 14 столбцов тоже обновлялись
     mode = os.environ.get("BADGE_STREAM_MODE", "full44")
     target_fps = float(os.environ.get("BADGE_FPS", "30"))
+    loop = os.environ.get("BADGE_LOOP", "1") != "0"   # по умолчанию крутим бесконечно
     FULL_EVERY = int(os.environ.get("BADGE_FULL_EVERY", "6"))
     log("режим: %s, быстрый кадр %d столбцов, панель %d%s, цель %.0f fps"
         % (mode, FAST_COLS, PANEL_COLS,
@@ -285,49 +286,61 @@ async def main():
 
     total, drops, t0 = 0, 0, time.time()
     cur_bri = await set_bri(c, BRI_MAX, None)
-    for name, fn, dur, brifn in SCENES:
-        st, n, s0 = {}, 0, time.time()
-        log("-> %s (%d с)%s" % (name, dur, "  [яркость]" if brifn or name.startswith("ЯРКОСТЬ") else ""))
-        while time.time() - s0 < dur:
-            t = time.time() - s0
-            cols = fn(t, st)
-            want = st.pop("_bri", None)
-            if want is None and brifn:
-                want = brifn(t, st)
-            if want is not None:
-                try:
-                    cur_bri = await set_bri(c, want, cur_bri)
-                except Exception:
-                    pass
-            full = (mode == "full44") or (mode == "hybrid" and n % FULL_EVERY == 0)
-            ncols = PANEL_COLS if full else FAST_COLS
-            payload = bytes((CMD_STREAM_BM,)) + frame_bytes(cols, ncols)
-            try:
-                await c.write_gatt_char(NG_WRITE, payload, response=not no_resp)
-                n += 1
-                if no_resp:
-                    # без подтверждения нет и торможения - задаём темп сами,
-                    # иначе очередь стека забивается и поток встаёт
-                    nxt = s0 + n / target_fps
-                    delay = nxt - time.time()
-                    if delay > 0:
-                        await asyncio.sleep(delay)
-            except Exception as e:
-                drops += 1
-                log("   обрыв на %d кадре (%r) - переподключаюсь" % (n, e))
-                try:
-                    await c.disconnect()
-                except Exception:
-                    pass
-                await asyncio.sleep(3)
-                c, no_resp = await connect()
-                if c is None:
-                    log("   переподключиться не удалось, останавливаюсь")
-                    return
-                log("   соединение восстановлено")
-        el = max(0.001, time.time() - s0)
-        total += n
-        log("   %d кадров за %.1f с = %.1f fps" % (n, el, n / el))
+    cycle = 0
+    while True:
+      cycle += 1
+      if loop:
+        log("")
+        log("========== КРУГ %d ==========" % cycle)
+      for name, fn, dur, brifn in SCENES:
+          st, n, s0 = {}, 0, time.time()
+          log("-> %s (%d с)%s" % (name, dur, "  [яркость]" if brifn or name.startswith("ЯРКОСТЬ") else ""))
+          while time.time() - s0 < dur:
+              t = time.time() - s0
+              cols = fn(t, st)
+              want = st.pop("_bri", None)
+              if want is None and brifn:
+                  want = brifn(t, st)
+              if want is not None:
+                  try:
+                      cur_bri = await set_bri(c, want, cur_bri)
+                  except Exception:
+                      pass
+              full = (mode == "full44") or (mode == "hybrid" and n % FULL_EVERY == 0)
+              ncols = PANEL_COLS if full else FAST_COLS
+              payload = bytes((CMD_STREAM_BM,)) + frame_bytes(cols, ncols)
+              try:
+                  await c.write_gatt_char(NG_WRITE, payload, response=not no_resp)
+                  n += 1
+                  if no_resp:
+                      # без подтверждения нет и торможения - задаём темп сами,
+                      # иначе очередь стека забивается и поток встаёт
+                      nxt = s0 + n / target_fps
+                      delay = nxt - time.time()
+                      if delay > 0:
+                          await asyncio.sleep(delay)
+              except Exception as e:
+                  drops += 1
+                  log("   обрыв на %d кадре (%r) - переподключаюсь" % (n, e))
+                  try:
+                      await c.disconnect()
+                  except Exception:
+                      pass
+                  await asyncio.sleep(3)
+                  c, no_resp = await connect()
+                  if c is None:
+                      log("   переподключиться не удалось, останавливаюсь")
+                      return
+                  log("   соединение восстановлено")
+          el = max(0.001, time.time() - s0)
+          total += n
+          log("   %d кадров за %.1f с = %.1f fps" % (n, el, n / el))
+
+      el = time.time() - t0
+      log("--- круг %d закончен: всего %d кадров за %.0f с, средний %.1f fps, обрывов %d"
+          % (cycle, total, el, total / max(0.001, el), drops))
+      if not loop:
+          break
 
     try:
         await set_bri(c, BRI_MAX, cur_bri)

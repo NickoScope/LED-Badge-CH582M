@@ -1,0 +1,5 @@
+#!/bin/bash
+# Бесконечная демонстрация. Остановить: pkill -f stream_demo.py
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+rm -f /tmp/stream_demo.log
+exec "$DIR/BLEPython.app/Contents/MacOS/Python" "$DIR/stream_demo.py"
