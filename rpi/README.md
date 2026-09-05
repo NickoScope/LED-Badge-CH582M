@@ -145,7 +145,13 @@ from badge.canvas import Canvas
 frame = Canvas().text("21:45", center=True).progress(0.5).frame()
 ```
 
-## Свой источник
+## Своя графика, анимация и игры
+
+Полное руководство — **[GRAPHICS.md](GRAPHICS.md)**: формат кадра, все методы
+`Canvas`, шрифты, бегущая строка, контракт источника, примеры анимации и игры,
+запись во флеш и ограничения железа.
+
+Коротко — свой источник
 
 ```python
 from badge.sources import Source, source
