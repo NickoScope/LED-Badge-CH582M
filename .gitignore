@@ -1,0 +1,19 @@
+# Виртуальные окружения (пересоздаются setup.sh)
+.venv/
+.venv312/
+
+# Подписанная копия Python.app для доступа к CoreBluetooth (пересоздаётся setup.sh)
+BLEPython.app/
+
+# Клон стороннего проекта - зависимость, не наш код
+led-name-badge-ls32/
+
+# Скачиваемые бинарники: wchisp и сборки прошивки badgemagic
+tools/
+firmware/
+
+# Служебное
+.claude/
+__pycache__/
+*.pyc
+.DS_Store

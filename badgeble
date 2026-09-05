@@ -1,0 +1,7 @@
+#!/bin/bash
+# Запуск через подписанную копию Python.app - иначе macOS убивает процесс
+# за отсутствие NSBluetoothAlwaysUsageDescription (TCC).
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+rm -f /tmp/badge_ble.log
+open -W -a "$DIR/BLEPython.app" --args "$DIR/badge_ble.py" "$@"
+cat /tmp/badge_ble.log 2>/dev/null

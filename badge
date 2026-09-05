@@ -1,0 +1,8 @@
+#!/bin/bash
+# Wrapper for fossasia/led-name-badge-ls32 on macOS (Apple Silicon).
+# Needs: brew install hidapi;  .venv with pyhidapi/pyusb/pillow
+# DYLD_FALLBACK_LIBRARY_PATH is required because ctypes.util.find_library()
+# does not look in /opt/homebrew/lib by default.
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export DYLD_FALLBACK_LIBRARY_PATH="/opt/homebrew/lib:$DYLD_FALLBACK_LIBRARY_PATH"
+exec "$DIR/.venv/bin/python" "$DIR/led-name-badge-ls32/lednamebadge.py" -M hidapi "$@"
