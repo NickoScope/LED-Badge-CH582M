@@ -1,0 +1,3 @@
+#!/bin/bash
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BADGE_STREAM_MODE=full44 "$DIR/BLEPython.app/Contents/MacOS/Python" "$DIR/stream_demo.py"

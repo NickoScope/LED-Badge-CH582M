@@ -30,6 +30,9 @@ COLS = PANEL_COLS
 FAST_COLS = int(os.environ.get("BADGE_STREAM_COLS", "30"))
 CMD_STREAM_SET = 0x02
 CMD_STREAM_BM  = 0x03
+CMD_MISC       = 0x08      # misc
+MISC_BRIGHT    = 0x01      # cfg_led_brightness, уровень 0..3
+BRI_MAX        = 3         # BRIGHTNESS_LEVELS = 4, 0 - самый тусклый
 
 
 def frame_bytes(cols, n=None):
@@ -157,16 +160,64 @@ def scene_heart(t, st):
     return cols
 
 
+def scene_brightness(t, st):
+    """Показывает текущий уровень и просит его сменить через st['_bri'].
+
+    Уровень меняется раз в 1.5 с по кругу 0 -> 1 -> 2 -> 3.
+    Рисунок специально плотный: на заливке разница уровней видна лучше всего.
+    """
+    lvl = int(t / 1.5) % 4
+    st["_bri"] = lvl
+    cols = [0] * COLS
+    # слева - шкала: столько столбцов-полос, каков уровень
+    for i in range(lvl + 1):
+        for x in range(i * 3, i * 3 + 2):
+            if x < COLS:
+                cols[x] = 0x07FF
+    # справа - крупная цифра уровня
+    d = text_cols(str(lvl))
+    x0 = COLS - len(d) - 2
+    for i, v in enumerate(d):
+        if 0 <= x0 + i < COLS:
+            cols[x0 + i] = v
+    # середина - плотная сетка, на ней разница яркости заметнее
+    for x in range(16, min(COLS - len(d) - 4, COLS)):
+        cols[x] = 0x0555 if x % 2 else 0x02AA
+    return cols
+
+
+def heart_brightness(t, st):
+    """Пульс яркости в такт биению сердца."""
+    beat = abs(math.sin(t * 2.6))
+    return int(round(beat * BRI_MAX))
+
+
+def fade_in(t, st):
+    """Плавное нарастание в первые 1.2 с сцены."""
+    return min(BRI_MAX, int(t / 0.4))
+
+
+# (имя, кадр, секунды, функция яркости или None)
 SCENES = [
-    ("ЧАСЫ с секундами", scene_clock,    6),
-    ("СПЕКТР",           scene_spectrum, 8),
-    ("ОСЦИЛЛОГРАФ",      scene_wave,     6),
-    ("БЕГУЩАЯ СТРОКА",   scene_scroll,   9),
-    ("МАТРИЦА",          scene_rain,     7),
-    ("СЕРДЦЕ",           scene_heart,    5),
+    ("ЯРКОСТЬ 0-3",      scene_brightness, 7, None),
+    ("ЧАСЫ с секундами", scene_clock,      6, fade_in),
+    ("СПЕКТР",           scene_spectrum,   8, None),
+    ("ОСЦИЛЛОГРАФ",      scene_wave,       6, None),
+    ("БЕГУЩАЯ СТРОКА",   scene_scroll,     9, None),
+    ("МАТРИЦА",          scene_rain,       7, fade_in),
+    ("СЕРДЦЕ",           scene_heart,      5, heart_brightness),
 ]
 
 
+
+
+async def set_bri(c, lvl, cur):
+    """Отправить уровень яркости, если он изменился. Возвращает новый текущий."""
+    lvl = max(0, min(BRI_MAX, int(lvl)))
+    if lvl == cur:
+        return cur
+    await c.write_gatt_char(NG_WRITE, bytes((CMD_MISC, MISC_BRIGHT, lvl)), response=True)
+    return lvl
 
 
 async def bench_one(c, ncols, secs, no_resp):
@@ -206,11 +257,13 @@ async def main():
     # full44 - вся панель, но длинной записью: медленно и рвётся
     # hybrid - быстрые кадры в 30 столбцов + полный кадр раз в FULL_EVERY,
     #          чтобы правые 14 столбцов тоже обновлялись
-    mode = os.environ.get("BADGE_STREAM_MODE", "hybrid")
+    mode = os.environ.get("BADGE_STREAM_MODE", "full44")
+    target_fps = float(os.environ.get("BADGE_FPS", "30"))
     FULL_EVERY = int(os.environ.get("BADGE_FULL_EVERY", "6"))
-    log("режим: %s, быстрый кадр %d столбцов, панель %d%s"
+    log("режим: %s, быстрый кадр %d столбцов, панель %d%s, цель %.0f fps"
         % (mode, FAST_COLS, PANEL_COLS,
-           ", полный кадр каждый %d-й" % FULL_EVERY if mode == "hybrid" else ""))
+           ", полный кадр каждый %d-й" % FULL_EVERY if mode == "hybrid" else "",
+           target_fps))
 
     c, no_resp = await connect()
     if c is None:
@@ -231,18 +284,34 @@ async def main():
         log("")
 
     total, drops, t0 = 0, 0, time.time()
-    for name, fn, dur in SCENES:
+    cur_bri = await set_bri(c, BRI_MAX, None)
+    for name, fn, dur, brifn in SCENES:
         st, n, s0 = {}, 0, time.time()
-        log("-> %s (%d с)" % (name, dur))
+        log("-> %s (%d с)%s" % (name, dur, "  [яркость]" if brifn or name.startswith("ЯРКОСТЬ") else ""))
         while time.time() - s0 < dur:
             t = time.time() - s0
             cols = fn(t, st)
+            want = st.pop("_bri", None)
+            if want is None and brifn:
+                want = brifn(t, st)
+            if want is not None:
+                try:
+                    cur_bri = await set_bri(c, want, cur_bri)
+                except Exception:
+                    pass
             full = (mode == "full44") or (mode == "hybrid" and n % FULL_EVERY == 0)
             ncols = PANEL_COLS if full else FAST_COLS
             payload = bytes((CMD_STREAM_BM,)) + frame_bytes(cols, ncols)
             try:
                 await c.write_gatt_char(NG_WRITE, payload, response=not no_resp)
                 n += 1
+                if no_resp:
+                    # без подтверждения нет и торможения - задаём темп сами,
+                    # иначе очередь стека забивается и поток встаёт
+                    nxt = s0 + n / target_fps
+                    delay = nxt - time.time()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
             except Exception as e:
                 drops += 1
                 log("   обрыв на %d кадре (%r) - переподключаюсь" % (n, e))
@@ -261,6 +330,7 @@ async def main():
         log("   %d кадров за %.1f с = %.1f fps" % (n, el, n / el))
 
     try:
+        await set_bri(c, BRI_MAX, cur_bri)
         await c.write_gatt_char(NG_WRITE, bytes((CMD_STREAM_SET, 0x01)), response=True)
         log("\nрежим стриминга выключен")
         await c.disconnect()

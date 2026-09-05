@@ -2,7 +2,7 @@
 # Прошивка варианта usb-c-2key-tb6: пин T = B6, J и K дефолтные.
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 W="$DIR/tools/wchisp-macos-arm64/wchisp"
-BIN="$DIR/firmware/badgemagic-usb-c-2key-tb6.bin"
+BIN="${1:-$DIR/firmware/badgemagic-usb-c-2key-tb6-mtu128.bin}"
 LOG=/tmp/flash_tb6.log
 : > "$LOG"
 echo "жду ISP до 240 с - долгое нажатие KEY2" | tee -a "$LOG"
