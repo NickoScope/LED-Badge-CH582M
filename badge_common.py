@@ -23,18 +23,20 @@ USB_REPORT = 64     # размер HID-отчёта
 
 
 def add_paths():
-    """Подключить venv с bleak и клон led-name-badge-ls32."""
-    for v in ("312", ""):
-        d = os.path.join(HERE, ".venv%s" % v, "lib")
-        if not os.path.isdir(d):
-            continue
-        for py in sorted(os.listdir(d)):
-            sp = os.path.join(d, py, "site-packages")
-            if os.path.isdir(sp) and sp not in sys.path:
-                sys.path.insert(0, sp)
+    """Подключить venv с нужными пакетами и клон led-name-badge-ls32.
+
+    ВАЖНО: подключается только то окружение, чья версия Python совпадает с
+    запущенным интерпретатором. Иначе site-packages от 3.9 перекрывает 3.12,
+    и бинарные модули (objc для CoreBluetooth) падают с ImportError.
+    """
+    tag = "python%d.%d" % sys.version_info[:2]
+    for name in (".venv312", ".venv"):
+        sp = os.path.join(HERE, name, "lib", tag, "site-packages")
+        if os.path.isdir(sp) and sp not in sys.path:
+            sys.path.insert(0, sp)
     ls32 = os.path.join(HERE, "led-name-badge-ls32")
     if os.path.isdir(ls32) and ls32 not in sys.path:
-        sys.path.insert(0, ls32)
+        sys.path.append(ls32)
 
 
 async def find_badge(timeout=30.0, addr=None):
