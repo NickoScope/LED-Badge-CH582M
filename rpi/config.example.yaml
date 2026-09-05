@@ -1,0 +1,25 @@
+# Пример конфигурации. Сейчас читается только как справка -
+# демон настраивается флагами badgectl daemon.
+badge:
+  address: null          # null - автопоиск по сервису FEE0
+  adapter: hci0
+  fps: 30                # клиент обязан задавать темп: при записи без
+                         # подтверждения обратной связи нет
+
+api:
+  host: 127.0.0.1
+  port: 8477
+
+source:
+  name: clock
+  options:
+    format: "%H:%M"
+    seconds_bar: true
+
+# Другие источники:
+#   scroll   text="ПРИВЕТ" speed=2
+#   sysinfo  speed=1              загрузка, память, температура Pi
+#   stdin    speed=1              journalctl -f | badgectl stream stdin
+#   spectrum mic=true             нужен sounddevice + numpy
+#   image    path=/home/pi/a.gif fps=12
+#   mqtt     host=... topic=badge/text

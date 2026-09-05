@@ -1,0 +1,18 @@
+[Unit]
+Description=LED badge daemon (BLE + HTTP API)
+After=bluetooth.target network.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/badge/rpi
+ExecStart=/home/pi/badge/rpi/.venv/bin/python /home/pi/badge/rpi/badgectl daemon --host 127.0.0.1 --port 8477 --source clock
+Restart=always
+RestartSec=5
+# BLE-соединение одно: демон единственный владелец, остальные ходят по HTTP
+KillSignal=SIGINT
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
