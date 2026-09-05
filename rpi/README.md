@@ -34,6 +34,7 @@ badgectl stream clock                     # часы потоком
 badgectl stream scroll -o text=ПРИВЕТ -o speed=2
 badgectl stream sysinfo                   # загрузка и температура Pi
 badgectl stream image -o path=anim.gif -o fps=12
+badgectl stream platformer                # бегущий человечек, трубы, монеты
 journalctl -f | badgectl stream stdin     # ЛЮБОЙ поток строк
 badgectl bright 2                         # яркость 0..3
 badgectl send "NICKO" --pin 1234          # ЗАПИСЬ ВО ФЛЕШ, играет без Pi
@@ -127,6 +128,12 @@ journalctl -u badge-daemon -f
 ограничения цикл забивает очередь стека. В `Badge.stream()` это уже сделано.
 
 **Яркости всего 4 уровня**, плавного диммирования у железа нет.
+
+**Не обрывайте клиента грубо.** `pkill` без обработки сигнала оставляет связь
+недорванной, и BLE-стек бейджа подвисает: устройство продолжает рекламироваться,
+но перестаёт принимать подключения — `connect()` уходит в тайм-аут. Лечится
+перезагрузкой бейджа через меню `OFF`. В `badgectl stream` и демоне обработка
+SIGINT/SIGTERM уже есть.
 
 ## Формат кадра
 

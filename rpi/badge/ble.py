@@ -44,6 +44,7 @@ class Badge:
         self._next_frame_at = 0.0
         self._streaming = False
         self._notify = []
+        self.last_error = None
 
     # --- свойства ----------------------------------------------------------
     @property
@@ -91,6 +92,7 @@ class Badge:
         for n in range(1, attempts + 1):
             dev = await self.discover()
             if dev is None:
+                self.last_error = "не в эфире"
                 log.warning("бейдж не в эфире (попытка %d/%d)", n, attempts)
                 await asyncio.sleep(3)
                 continue
@@ -98,12 +100,18 @@ class Badge:
                 cl = BleakClient(dev, timeout=timeout)
                 await cl.connect()
             except Exception as e:
+                self.last_error = repr(e)
                 log.warning("подключение не удалось: %r (попытка %d/%d)", e, n, attempts)
                 await asyncio.sleep(3)
                 continue
             self._client = cl
             self._after_connect()
+            self.last_error = None
             return True
+        log.error("подключиться не удалось: %s. Если бейдж виден в эфире, но "
+                  "соединение отваливается по тайм-ауту — его BLE-стек мог "
+                  "подвиснуть после грубо оборванного клиента; помогает "
+                  "перезагрузка бейджа через меню OFF", self.last_error)
         return False
 
     def _after_connect(self):

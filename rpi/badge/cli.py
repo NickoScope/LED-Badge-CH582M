@@ -47,6 +47,15 @@ async def cmd_stream(a):
     opts = dict(kv.split("=", 1) for kv in a.opt) if a.opt else {}
     src = REGISTRY[a.source](**opts)
     stop = asyncio.Event()
+    # Обрыв на полуслове подвешивает BLE-стек бейджа: он продолжает
+    # рекламироваться, но перестаёт принимать подключения. Успеваем выйти
+    # из режима стриминга и разорвать связь по-человечески.
+    import signal
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            asyncio.get_running_loop().add_signal_handler(sig, stop.set)
+        except NotImplementedError:
+            pass
     async with Badge(address=a.address, adapter=a.adapter, target_fps=a.fps) as b:
         await b.clear()
         await b.stream_enter()

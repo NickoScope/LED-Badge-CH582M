@@ -252,3 +252,128 @@ class Mqtt(Source):
 
     def frame(self, t):
         return self.sc.step(float(self.opts.get("speed", 1.0)))
+
+
+@source("platformer")
+class Platformer(Source):
+    """Две минуты из жизни бегущего человечка: трубы, ямы, монеты, флаг.
+
+    Мир прокручивается влево, герой сидит на месте по горизонтали и сам решает,
+    когда прыгать. Всё детерминировано от позиции в мире, так что уровень
+    воспроизводим и не требует памяти под историю.
+    """
+    name = "platformer"
+
+    GROUND = ROWS - 1
+    HERO_X = 7
+
+    RUN = (("010", "111", "010", "101", "101"),
+           ("010", "111", "010", "110", "011"))
+    JUMP = ("111", "010", "111", "101", "100")
+
+    def __init__(self, **opts):
+        super().__init__(**opts)
+        self.speed = float(opts.get("speed", 11.0))   # столбцов в секунду
+        self.wx = 0.0
+        self.y = 0.0            # высота над землёй
+        self.vy = 0.0
+        self.coins = 0
+        self.taken = set()
+        self.last = 0.0
+
+    # --- мир ---------------------------------------------------------------
+    def _pipe_h(self, wx):
+        """Труба высотой 2..4 примерно каждые 19 столбцов."""
+        if wx < 24 or wx % 19 not in (0, 1, 2):
+            return 0
+        return 2 + (wx // 19) % 3
+
+    def _gap(self, wx):
+        """Яма шириной 3 — редко, и никогда рядом с трубой."""
+        return wx > 40 and (wx // 43) % 4 == 3 and wx % 43 in (0, 1, 2)
+
+    def _coin(self, wx):
+        return wx > 12 and wx % 13 == 6
+
+    def _flag(self, wx):
+        """Флаг в конце круга — каждые ~330 столбцов."""
+        return wx % 331 in (0, 1)
+
+    def _obstacle_ahead(self, wx, look=7):
+        for d in range(2, look):
+            if self._pipe_h(wx + d) or self._gap(wx + d):
+                return d
+        return 0
+
+    # --- кадр --------------------------------------------------------------
+    def frame(self, t):
+        dt = min(0.08, max(0.0, t - self.last))
+        self.last = t
+        self.wx += self.speed * dt
+        wx0 = int(self.wx)
+
+        # физика
+        on_ground = self.y <= 0.001
+        if on_ground:
+            self.y = 0.0
+            self.vy = 0.0
+            hx = wx0 + self.HERO_X
+            d = self._obstacle_ahead(hx)
+            if d:
+                need = self._pipe_h(hx + d)
+                self.vy = 16.0 if need >= 3 or self._gap(hx + d) else 14.0
+            else:
+                # монеты висят на высоте 5 — за ними тоже подпрыгиваем
+                for k in range(2, 6):
+                    if self._coin(hx + k) and (hx + k) not in self.taken:
+                        self.vy = 15.0
+                        break
+        else:
+            self.vy -= 26.0 * dt
+        self.y = max(0.0, self.y + self.vy * dt)
+
+        c = Canvas()
+
+        # облака — параллакс, вдвое медленнее
+        for sx in range(COLS):
+            cwx = int(self.wx * 0.5) + sx
+            if cwx % 23 in (0, 1, 2, 3) and (cwx // 23) % 2 == 0:
+                c.px(sx, 0)
+            if cwx % 23 in (1, 2) and (cwx // 23) % 2 == 0:
+                c.px(sx, 1)
+
+        # земля, трубы, ямы, монеты, флаг
+        for sx in range(COLS):
+            wx = wx0 + sx
+            if not self._gap(wx):
+                c.px(sx, self.GROUND)
+            h = self._pipe_h(wx)
+            for k in range(h):
+                c.px(sx, self.GROUND - 1 - k)
+            if self._coin(wx) and wx not in self.taken:
+                c.px(sx, self.GROUND - 5)
+            if self._flag(wx):
+                for y in range(2, self.GROUND):
+                    c.px(sx, y)
+                c.px(sx + 1, 2).px(sx + 2, 2).px(sx + 1, 3)
+
+        # герой
+        hy = int(round(self.y))
+        top = self.GROUND - 4 - hy
+        sprite = self.JUMP if hy > 0 else self.RUN[int(t * 9) % 2]
+        for row, bits in enumerate(sprite):
+            for col, ch in enumerate(bits):
+                if ch == "1":
+                    c.px(self.HERO_X + col, top + row)
+
+        # подбор монеты
+        hero_wx = wx0 + self.HERO_X
+        for d in range(0, 3):
+            w = hero_wx + d
+            if self._coin(w) and w not in self.taken and top <= self.GROUND - 5 <= top + 4:
+                self.taken.add(w)
+                self.coins += 1
+                for yy in range(2, 6):
+                    c.px(self.HERO_X + d, yy)
+
+        return c.frame()
