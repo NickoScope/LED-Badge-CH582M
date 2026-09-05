@@ -13,10 +13,16 @@ import os
 from typing import List, Optional
 
 import httpx
-from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict, Field
 
-mcp = FastMCP("badge_mcp")
+# В mcp 2.x FastMCP переименован в MCPServer. Поддерживаем обе версии,
+# чтобы пакет ставился на Pi независимо от того, какая подтянется.
+try:
+    from mcp.server.mcpserver import MCPServer as _Server   # mcp >= 2
+except ImportError:                                          # pragma: no cover
+    from mcp.server.fastmcp import FastMCP as _Server        # mcp 1.x
+
+mcp = _Server("badge_mcp")
 
 API = os.environ.get("BADGE_API", "http://127.0.0.1:8477")
 TIMEOUT = float(os.environ.get("BADGE_API_TIMEOUT", "30"))

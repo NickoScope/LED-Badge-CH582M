@@ -82,6 +82,19 @@ curl -X POST localhost:8477/clear
 `badge_set_source`, `badge_send_frame`, `badge_set_brightness`, `badge_clear`,
 `badge_stop`, `badge_upload_text`, `badge_configure`.
 
+Работает и с `mcp` 1.x, и с 2.x: в версии 2 класс `FastMCP` переименован
+в `MCPServer`, импорт сделан с запасным вариантом.
+
+Аргументы передаются вложенным объектом `params` — так генерирует схему
+FastMCP/MCPServer для инструментов с моделью Pydantic:
+
+```json
+{"name": "badge_show_text", "arguments": {"params": {"text": "ПРИВЕТ", "scroll": true}}}
+```
+
+Проверено по протоколу против живого бейджа: initialize, list_tools,
+последовательные вызовы status / show_text / set_brightness / show_clock / stop.
+
 ## Служба
 
 ```bash
