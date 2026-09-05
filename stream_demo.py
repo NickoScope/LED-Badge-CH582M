@@ -24,8 +24,10 @@ def log(s):
 open(OUT, "w").close()
 
 PANEL_COLS, ROWS = 44, 11
-# сколько столбцов гоним в потоке (stream_bitmap копирует от fb[0])
-COLS = int(os.environ.get("BADGE_STREAM_COLS", "30"))
+# Сцены рисуют ВСЕГДА полную ширину панели.
+COLS = PANEL_COLS
+# Ширина быстрой посылки: 1 + 2*FAST_COLS должно влезать в ATT-пакет (61 байт при MTU 64).
+FAST_COLS = int(os.environ.get("BADGE_STREAM_COLS", "30"))
 CMD_STREAM_SET = 0x02
 CMD_STREAM_BM  = 0x03
 
@@ -167,90 +169,107 @@ SCENES = [
 
 
 
-async def benchmark(c, no_resp):
-    """Измерить, во сколько обходится длинная запись.
-
-    При MTU=64 в один ATT-пакет влезает 61 байт. Кадр из 30 столбцов
-    (1 + 60 = 61 байт) проходит одной посылкой, полный кадр из 44 столбцов
-    (1 + 88 = 89 байт) требует длинной записи: подготовка + исполнение.
-    """
+async def bench_one(c, ncols, secs, no_resp):
     import time as _t
-    res = {}
-    for label, ncols in (("30 столбцов (61 байт, одна посылка)", 30),
-                         ("44 столбца (89 байт, длинная запись)", 44)):
-        cols = [bar((i % 11) + 1) for i in range(ncols)]
-        body = bytearray()
-        for i in range(ncols):
-            v = cols[i] & 0x07FF
-            body += bytes((v & 0xFF, (v >> 8) & 0xFF))
-        payload = bytes((CMD_STREAM_BM,)) + bytes(body)
-        n, t0 = 0, _t.time()
-        while _t.time() - t0 < 4.0:
-            await c.write_gatt_char(NG_WRITE, payload, response=not no_resp)
-            n += 1
-        el = _t.time() - t0
-        res[label] = n / el
-        log("   %-38s %5.1f fps" % (label, n / el))
-    return res
+    cols = [bar((i % 11) + 1) for i in range(ncols)]
+    payload = bytes((CMD_STREAM_BM,)) + frame_bytes(cols, ncols)
+    n, t0 = 0, _t.time()
+    while _t.time() - t0 < secs:
+        await c.write_gatt_char(NG_WRITE, payload, response=not no_resp)
+        n += 1
+    return n / (_t.time() - t0)
 
-async def main():
+
+async def connect():
+    """Подключиться к бейджу, вернуть (client, no_resp) или (None, None)."""
     from bleak import BleakClient
-    log("ищу бейдж...")
     dev = await find_badge(timeout=30.0)
     if dev is None:
-        log("НЕ НАЙДЕН. Включи BT-PAIRING в меню и повтори.")
+        return None, None
+    c = BleakClient(dev, timeout=25.0)
+    await c.connect()
+    ch = None
+    for srv in c.services:
+        for x in srv.characteristics:
+            if x.uuid == NG_WRITE:
+                ch = x
+    if ch is None:
+        await c.disconnect()
+        return None, None
+    no_resp = "write-without-response" in ch.properties
+    await c.write_gatt_char(NG_WRITE, bytes((CMD_STREAM_SET, 0x00)), response=True)
+    return c, no_resp
+
+
+async def main():
+    # fast30 - только левые 30 столбцов, быстро и стабильно
+    # full44 - вся панель, но длинной записью: медленно и рвётся
+    # hybrid - быстрые кадры в 30 столбцов + полный кадр раз в FULL_EVERY,
+    #          чтобы правые 14 столбцов тоже обновлялись
+    mode = os.environ.get("BADGE_STREAM_MODE", "hybrid")
+    FULL_EVERY = int(os.environ.get("BADGE_FULL_EVERY", "6"))
+    log("режим: %s, быстрый кадр %d столбцов, панель %d%s"
+        % (mode, FAST_COLS, PANEL_COLS,
+           ", полный кадр каждый %d-й" % FULL_EVERY if mode == "hybrid" else ""))
+
+    c, no_resp = await connect()
+    if c is None:
+        log("НЕ НАЙДЕН или нет профиля F057. Включи BT-PAIRING и повтори.")
         return
-    async with BleakClient(dev, timeout=25.0) as c:
-        log("подключено, MTU=%s" % getattr(c, "mtu_size", "?"))
-        ch = None
-        for s in c.services:
-            for x in s.characteristics:
-                if x.uuid == NG_WRITE:
-                    ch = x
-        if ch is None:
-            log("next-gen профиль F057 не найден - нужна прошивка badgemagic")
-            return
-        no_resp = "write-without-response" in ch.properties
-        log("свойства F057: %s -> пишу %s" %
-            (",".join(ch.properties), "без подтверждения" if no_resp else "с подтверждением"))
+    log("подключено, MTU=%s, запись %s" %
+        (getattr(c, "mtu_size", "?"), "без подтверждения" if no_resp else "с подтверждением"))
 
-        await c.write_gatt_char(NG_WRITE, bytes((CMD_STREAM_SET, 0x00)), response=True)
-        log("режим стриминга включён\n")
+    await c.write_gatt_char(NG_WRITE,
+            bytes((CMD_STREAM_BM,)) + frame_bytes([0] * PANEL_COLS, PANEL_COLS),
+            response=True)
+    log("панель очищена целиком\n")
 
-        await c.write_gatt_char(NG_WRITE,
-                bytes((CMD_STREAM_BM,)) + frame_bytes([0] * PANEL_COLS, PANEL_COLS),
-                response=True)
-        log("панель очищена целиком (%d столбцов), поток идёт в %d столбцов\n"
-            % (PANEL_COLS, COLS))
-
-        log("-> ЗАМЕР пропускной способности")
-        await benchmark(c, no_resp)
+    if os.environ.get("BADGE_BENCH"):
+        log("-> ЗАМЕР")
+        log("   30 столбцов: %.1f fps" % await bench_one(c, 30, 4.0, no_resp))
+        log("   44 столбца:  %.1f fps" % await bench_one(c, PANEL_COLS, 4.0, no_resp))
         log("")
 
-        total, t0 = 0, time.time()
-        for name, fn, dur in SCENES:
-            st, n, s0 = {}, 0, time.time()
-            log("-> %s (%d с)" % (name, dur))
+    total, drops, t0 = 0, 0, time.time()
+    for name, fn, dur in SCENES:
+        st, n, s0 = {}, 0, time.time()
+        log("-> %s (%d с)" % (name, dur))
+        while time.time() - s0 < dur:
+            t = time.time() - s0
+            cols = fn(t, st)
+            full = (mode == "full44") or (mode == "hybrid" and n % FULL_EVERY == 0)
+            ncols = PANEL_COLS if full else FAST_COLS
+            payload = bytes((CMD_STREAM_BM,)) + frame_bytes(cols, ncols)
             try:
-                while time.time() - s0 < dur:
-                    payload = bytes((CMD_STREAM_BM,)) + frame_bytes(fn(time.time() - s0, st))
-                    await c.write_gatt_char(NG_WRITE, payload, response=not no_resp)
-                    n += 1
+                await c.write_gatt_char(NG_WRITE, payload, response=not no_resp)
+                n += 1
             except Exception as e:
-                log("   связь оборвалась на %d кадре: %r" % (n, e))
-                el = max(0.001, time.time() - s0); total += n
-                log("   %d кадров за %.1f с = %.1f fps" % (n, el, n / el))
-                break
-            el = time.time() - s0
-            total += n
-            log("   %d кадров за %.1f с = %.1f fps" % (n, el, n / el))
-        try:
-            await c.write_gatt_char(NG_WRITE, bytes((CMD_STREAM_SET, 0x01)), response=True)
-            log("\nрежим стриминга выключен")
-        except Exception:
-            log("\n(выйти из режима стриминга не удалось - связь уже потеряна)")
-        el = time.time() - t0
-        log("ИТОГО: %d кадров за %.1f с, средний %.1f fps" % (total, el, total / max(0.001, el)))
+                drops += 1
+                log("   обрыв на %d кадре (%r) - переподключаюсь" % (n, e))
+                try:
+                    await c.disconnect()
+                except Exception:
+                    pass
+                await asyncio.sleep(3)
+                c, no_resp = await connect()
+                if c is None:
+                    log("   переподключиться не удалось, останавливаюсь")
+                    return
+                log("   соединение восстановлено")
+        el = max(0.001, time.time() - s0)
+        total += n
+        log("   %d кадров за %.1f с = %.1f fps" % (n, el, n / el))
+
+    try:
+        await c.write_gatt_char(NG_WRITE, bytes((CMD_STREAM_SET, 0x01)), response=True)
+        log("\nрежим стриминга выключен")
+        await c.disconnect()
+    except Exception:
+        log("\n(связь потеряна на выходе)")
+    el = time.time() - t0
+    log("ИТОГО: %d кадров за %.1f с, средний %.1f fps, обрывов: %d"
+        % (total, el, total / max(0.001, el), drops))
+
 
 try:
     asyncio.run(main())
