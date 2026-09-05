@@ -45,18 +45,48 @@ def frame_bytes(cols, n=None):
     return bytes(b)
 
 
-def text_cols(text):
-    """Отрисовать текст шрифтом 5x7 из led-name-badge-ls32 в столбцы."""
+def text_cols(t):
+    """Отрисовать текст в столбцы, ПОСИМВОЛЬНО.
+
+    Через SimpleTextAndIcons.bitmap() нельзя: двоеточие там - синтаксис вставки
+    иконок, и "23:18:35" превращается в "2", chr(18), "5" -> IndexError.
+    Падение зависит от минуты, поэтому часы ломались через раз.
+    bitmap_char() обходит этот разбор.
+    """
     from lednamebadge import SimpleTextAndIcons
-    bm, n = SimpleTextAndIcons().bitmap(text)
+    creator = SimpleTextAndIcons()
     out = []
-    for x in range(n * 8):
-        blk, bit = x // 8, 7 - (x % 8)
-        v = 0
-        for y in range(ROWS):
-            if (bm[blk * ROWS + y] >> bit) & 1:
-                v |= 1 << y
-        out.append(v)
+    for ch in t:
+        b, n = creator.bitmap_char(ch)
+        for blk in range(n):
+            for x in range(8):
+                v = 0
+                for y in range(ROWS):
+                    if (b[blk * ROWS + y] >> (7 - x)) & 1:
+                        v |= 1 << y
+                out.append(v)
+    return out
+
+
+def text_cols_tight(t, gap=1):
+    """То же, но без пустых столбцов внутри глифов.
+
+    bitmap_char отдаёт байт-столбец на символ, то есть 8 px, хотя шрифт 5x7.
+    Для HH:MM:SS это 64 px при панели 44 - не влезает. Здесь каждый глиф
+    обрезается по краям и склеивается через gap пустых столбцов.
+    """
+    out = []
+    for ch in t:
+        g = text_cols(ch)
+        while g and g[0] == 0:
+            g.pop(0)
+        while g and g[-1] == 0:
+            g.pop()
+        if not g:                      # пробел
+            g = [0, 0]
+        if out:
+            out += [0] * gap
+        out += g
     return out
 
 
@@ -69,10 +99,22 @@ def bar(h):
 # ---------------- сцены ----------------
 
 def scene_clock(t, st):
-    s = datetime.now().strftime("%H:%M:%S")
-    c = text_cols(s)
-    off = max(0, (len(c) - COLS) // 2)
-    return c[off:off + COLS]
+    """HH:MM по центру, секунды - растущей полосой по нижней строке.
+
+    HH:MM:SS даже плотной отрисовкой это 52 столбца при панели 44,
+    поэтому секунды показываем иначе.
+    """
+    now = datetime.now()
+    c = text_cols_tight(now.strftime("%H:%M"))
+    cols = [0] * COLS
+    x0 = max(0, (COLS - len(c)) // 2)
+    for i, v in enumerate(c):
+        if x0 + i < COLS:
+            cols[x0 + i] = v << 1        # сдвиг вверх, освобождаем нижнюю строку
+    filled = int(now.second / 60.0 * COLS)
+    for x in range(filled):
+        cols[x] |= 1 << (ROWS - 1)       # нижняя строка
+    return cols
 
 
 def scene_spectrum(t, st):

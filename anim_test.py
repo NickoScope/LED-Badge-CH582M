@@ -29,16 +29,25 @@ SAFETY_BYTES = 16000     # дальше рискуем затереть badge_cf
 
 
 def text_cols(t):
+    """Отрисовать текст в столбцы, ПОСИМВОЛЬНО.
+
+    Через SimpleTextAndIcons.bitmap() нельзя: двоеточие там - синтаксис вставки
+    иконок, и "23:18:35" превращается в "2", chr(18), "5" -> IndexError.
+    Падение зависит от минуты, поэтому часы ломались через раз.
+    bitmap_char() обходит этот разбор.
+    """
     from lednamebadge import SimpleTextAndIcons
-    bm, n = SimpleTextAndIcons().bitmap(t)
+    creator = SimpleTextAndIcons()
     out = []
-    for x in range(n * 8):
-        blk, bit = x // 8, 7 - (x % 8)
-        v = 0
-        for y in range(ROWS):
-            if (bm[blk * ROWS + y] >> bit) & 1:
-                v |= 1 << y
-        out.append(v)
+    for ch in t:
+        b, n = creator.bitmap_char(ch)
+        for blk in range(n):
+            for x in range(8):
+                v = 0
+                for y in range(ROWS):
+                    if (b[blk * ROWS + y] >> (7 - x)) & 1:
+                        v |= 1 << y
+                out.append(v)
     return out
 
 
