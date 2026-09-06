@@ -4,12 +4,108 @@
 где CoreBluetooth требует подписанного Python.app с NSBluetoothAlwaysUsageDescription.
 """
 import asyncio
+import collections
 import logging
 import time
 
 from . import proto
 
 log = logging.getLogger("badge.ble")
+
+
+class Keys:
+    """Кнопки бейджа, как их видит хост.
+
+    Прошивка сообщает только фронты — нажата, отпущена. Всё остальное
+    (долгое нажатие, двойное, аккорд, автоповтор) хост выводит сам из
+    состояния и времени фронтов, поэтому здесь есть ровно это: что нажато
+    сейчас и с какого момента, сколько нажатий было с последнего опроса,
+    и очередь событий для тех, кто хочет ждать ввод, а не опрашивать.
+    """
+    NAMES = ("KEY1", "KEY2")
+
+    def __init__(self, maxlen=256):
+        self.down = {}                                   # key -> t нажатия
+        self.presses = {k: 0 for k in self.NAMES}        # фронты с последнего take()
+        self.releases = {k: 0 for k in self.NAMES}
+        self.events = collections.deque(maxlen=maxlen)   # (t, key, down)
+        self.queue = asyncio.Queue(maxsize=maxlen)
+        self.total = 0
+        self.last_event_at = None
+        self.badge_exited = False
+        self.on_exit = None
+
+    def feed(self, ev, t=None):
+        """Событие от parse_notify(). Возвращает True, если это было наше."""
+        t = time.monotonic() if t is None else t
+        kind = ev.get("type")
+        if kind == "key":
+            key, down = ev["key"], ev["down"]
+            if down:
+                self.down[key] = t
+                self.presses[key] += 1
+            else:
+                self.down.pop(key, None)
+                self.releases[key] += 1
+            self.total += 1
+            self.last_event_at = t
+            self.events.append((t, key, down))
+            if self.queue.full():
+                self.queue.get_nowait()
+            self.queue.put_nowait((t, key, down))
+            return True
+        if kind == "exit":
+            self.reset()
+            self.badge_exited = True
+            if self.on_exit:
+                self.on_exit()
+            return True
+        return False
+
+    def is_down(self, key):
+        return key in self.down
+
+    def held_for(self, key, now=None):
+        if key not in self.down:
+            return 0.0
+        return (time.monotonic() if now is None else now) - self.down[key]
+
+    def take(self, key):
+        """Сколько раз клавишу нажали с прошлого вызова (и обнулить)."""
+        n = self.presses.get(key, 0)
+        self.presses[key] = 0
+        return n
+
+    def take_releases(self, key):
+        n = self.releases.get(key, 0)
+        self.releases[key] = 0
+        return n
+
+    def reset(self):
+        self.down.clear()
+        for k in self.NAMES:
+            self.presses[k] = self.releases[k] = 0
+        while not self.queue.empty():
+            self.queue.get_nowait()
+        self.badge_exited = False
+
+    def snapshot(self):
+        now = time.monotonic()
+        return {
+            "down": sorted(self.down),
+            "held_s": {k: round(now - t0, 3) for k, t0 in self.down.items()},
+            "events_total": self.total,
+            "last_event_age_s": (round(now - self.last_event_at, 3)
+                                 if self.last_event_at else None),
+            "badge_exited": self.badge_exited,
+        }
+
+    def recent(self, n=50):
+        if n <= 0:
+            return []
+        now = time.monotonic()
+        return [{"age_s": round(now - t, 3), "key": k, "down": d}
+                for t, k, d in list(self.events)[-n:]]
 
 
 class BadgeError(Exception):
@@ -43,7 +139,8 @@ class Badge:
         self._mtu = 23
         self._next_frame_at = 0.0
         self._streaming = False
-        self._notify = []
+        self._notify = collections.deque(maxlen=64)   # не копить 30/с вечно
+        self.keys = Keys()
         self.last_error = None
 
     # --- свойства ----------------------------------------------------------
@@ -106,6 +203,7 @@ class Badge:
                 continue
             self._client = cl
             self._after_connect()
+            await self._subscribe()
             self.last_error = None
             return True
         log.error("подключиться не удалось: %s. Если бейдж виден в эфире, но "
@@ -136,14 +234,21 @@ class Badge:
 
     async def disconnect(self):
         if self._client is not None:
-            try:
-                if self._streaming:
+            if self._streaming:
+                try:
                     await self._raw_ng(proto.cmd_stream_leave())
+                except Exception as e:
+                    log.warning("выход из стриминга не прошёл: %r", e)
+            # Само отключение — безусловно: иначе линк оставался бы висеть
+            # на уровне ОС или bluetoothd после неудачной записи выше.
+            try:
                 await self._client.disconnect()
-            except Exception:
-                pass
+                log.info("отключился от бейджа штатно")
+            except Exception as e:
+                log.warning("отключение не прошло чисто: %r", e)
         self._client = None
         self._streaming = False
+        self.keys.reset()
 
     async def __aenter__(self):
         if not await self.connect():
@@ -162,6 +267,7 @@ class Badge:
         self._client = None
         if not await self.connect():
             raise NotConnected("переподключиться не удалось")
+        self.keys.reset()          # клавиша, зажатая при обрыве, не вечна
         if self._streaming:
             await self._raw_ng(proto.cmd_stream_enter())
 
@@ -179,6 +285,19 @@ class Badge:
             await self._ensure()
             await self._raw_ng(payload, response)
 
+    def _on_notify(self, data):
+        ev = proto.parse_notify(data)
+        if ev["type"] == "exit":
+            # Долгий KEY2 на бейдже: он уже в меню, кадры дальше не примет.
+            log.info("бейдж вышел из стриминга сам")
+            self._streaming = False
+        self.keys.feed(ev)
+
+    async def _subscribe(self):
+        """Подписка на F056: коды возврата и события кнопок. Прошивка без
+        событий просто никогда их не пришлёт — подписка безвредна."""
+        return await self.enable_notify(self._on_notify)
+
     async def enable_notify(self, cb=None):
         def _cb(_h, data):
             b = bytes(data)
@@ -193,6 +312,7 @@ class Badge:
             return False
 
     async def stream_enter(self):
+        self.keys.reset()          # новый сеанс — старый badge_exited не в счёт
         await self.ng(proto.cmd_stream_enter())
         self._streaming = True
         self._next_frame_at = time.monotonic()
@@ -200,6 +320,7 @@ class Badge:
     async def stream_leave(self):
         await self.ng(proto.cmd_stream_leave())
         self._streaming = False
+        self.keys.reset()
 
     async def stream(self, columns, pace=True):
         """Один кадр прямо в фреймбуфер. Флеш не трогается.

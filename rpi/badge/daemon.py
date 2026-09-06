@@ -5,6 +5,8 @@ Bluetooth-канал к бейджу один, поэтому владелец �
 """
 import asyncio
 import logging
+import os
+import signal
 import time
 
 from aiohttp import web
@@ -35,6 +37,9 @@ class Daemon:
             ok = await self.badge.stream(frame)
             if ok:
                 self.frames += 1
+        src.keys = self.badge.keys
+        # Долгий KEY2 на бейдже выводит его в меню — поток дальше бессмыслен.
+        self.badge.keys.on_exit = self.stop_ev.set
         try:
             await src.run(out, self.stop_ev)
         except asyncio.CancelledError:
@@ -42,6 +47,14 @@ class Daemon:
         except Exception as e:
             self.last_error = repr(e)
             log.exception("источник упал")
+        finally:
+            # Поток кончился без /stop — бейдж вышел сам (долгий KEY2) или
+            # источник упал. Без этого /status показывал бы живой источник,
+            # а /frame не входил бы в стриминг заново. /stop не задет: там
+            # _stop_locked обнуляет сам, а этот task к тому моменту не наш.
+            if self.task is asyncio.current_task():
+                self.source = self.source_name = None
+                self.task = None
 
     async def set_source(self, name, **opts):
         if name not in REGISTRY:
@@ -96,6 +109,7 @@ class Daemon:
             "target_fps": self.badge.target_fps,
             "last_error": self.last_error,
             "sources_available": sorted(REGISTRY),
+            "keys": self.badge.keys.snapshot(),
         }
 
 
@@ -106,6 +120,18 @@ def build_app(d):
     @routes.get("/status")
     async def status(r):
         return web.json_response(d.status())
+
+    @routes.get("/keys")
+    async def keys(r):
+        """Кнопки бейджа: что нажато сейчас и последние события. Приходят
+        только в режиме стриминга и только с прошивкой, которая их шлёт."""
+        try:
+            n = max(0, min(256, int(r.query.get("n", 50))))
+        except ValueError:
+            raise web.HTTPBadRequest(reason="n — целое число событий")
+        k = d.badge.keys
+        return web.json_response({**k.snapshot(), "recent": k.recent(n),
+                                  "streaming": d.source is not None})
 
     @routes.post("/source")
     async def set_source(r):
@@ -236,10 +262,32 @@ async def run(host="127.0.0.1", port=8477, address=None,
     site = web.TCPSite(runner, host, port)
     await site.start()
     log.info("HTTP API на http://%s:%d", host, port)
+    # SIGINT и SIGTERM — одинаково штатный выход: finally ниже выходит из
+    # стриминга и рвёт связь по-человечески. Без обработчика SIGTERM убивал
+    # процесс мимо finally, и бейдж оставался с оборванным соединением —
+    # после такого его стек однажды переставал принимать подключения.
+    done = asyncio.Event()
+
+    def on_signal():
+        if done.is_set():                 # второй сигнал: не ждать отключения
+            os._exit(130)
+        done.set()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            asyncio.get_running_loop().add_signal_handler(sig, on_signal)
+        except NotImplementedError:      # не Unix — остаётся KeyboardInterrupt
+            pass
     try:
-        while True:
-            await asyncio.sleep(3600)
+        await done.wait()
+        log.info("сигнал остановки — закрываю поток и соединение")
     finally:
-        await d.stop()
+        # При остановке не переподключаться: иначе неудачная запись
+        # stream_leave уводит в 90 с скана эфира, и systemd убивает процесс
+        # грубо — ровно то, от чего эта остановка защищает.
+        d.badge.reconnect = False
+        try:
+            await asyncio.wait_for(d.stop(), 5)
+        except (asyncio.TimeoutError, Exception) as e:
+            log.warning("поток не остановился чисто: %r", e)
         await d.badge.disconnect()
         await runner.cleanup()

@@ -9,7 +9,7 @@ import os
 import time
 from datetime import datetime
 
-from .canvas import Canvas, Scroller, text_columns
+from .canvas import Canvas, Scroller
 from .proto import COLS, ROWS
 
 REGISTRY = {}
@@ -23,8 +23,15 @@ def source(name):
 
 
 class Source:
-    """База. Наследник реализует frame(t) или переопределяет run()."""
+    """База. Наследник реализует frame(t) или переопределяет run().
+
+    keys — состояние кнопок бейджа (badge.ble.Keys), демон подставляет его
+    перед запуском; None, если ввода нет. Опрос: keys.take("KEY1") — сколько
+    раз нажали с прошлого кадра, keys.is_down("KEY2") — держат ли сейчас,
+    keys.held_for("KEY2") — как долго. Ожидание: await keys.queue.get().
+    """
     name = "source"
+    keys = None
 
     def __init__(self, **opts):
         self.opts = opts
@@ -274,12 +281,42 @@ class Platformer(Source):
     def __init__(self, **opts):
         super().__init__(**opts)
         self.speed = float(opts.get("speed", 11.0))   # столбцов в секунду
+        # auto=1 — старый режим: герой прыгает сам, демонстрация без кнопок.
+        # Иначе прыжок по KEY1; отпустил рано — прыжок короче. Если кнопок
+        # нет (старая прошивка, keys is None) — тоже автопрыжок.
+        self.auto = str(opts.get("auto", "0")).lower() in ("1", "true", "yes", "on")
+        self.runs = 0
+        self.best = 0
+        self.last = 0.0
+        self.dead_until = 0.0
+        self._reset_run()
+
+    def _reset_run(self):
         self.wx = 0.0
         self.y = 0.0            # высота над землёй
         self.vy = 0.0
         self.coins = 0
         self.taken = set()
-        self.last = 0.0
+
+    # --- опора и препятствия под героем -------------------------------------
+    def _floor(self, hx):
+        """Высота опоры под героем: 0 — земля, h — крыша трубы (стоять можно
+        и на краю, поэтому максимум по трём столбцам), None — центр героя
+        над ямой: край ямы ногами не зацепить."""
+        if self._gap(hx + 1):
+            return None
+        return max(self._pipe_h(c) for c in range(hx, hx + 3))
+
+    def _blocked(self, hx):
+        """Труба на пути, а герой ниже её крыши — мир дальше не едет."""
+        return max(self._pipe_h(c) for c in range(hx, hx + 3)) > self.y + 0.001
+
+    def _dead_frame(self, t):
+        c = Canvas()
+        c.text("COINS %d" % self.coins, center=True, tiny=True)
+        if int(t * 4) % 2:
+            c.hline(ROWS - 1)
+        return c.frame()
 
     # --- мир ---------------------------------------------------------------
     def _pipe_h(self, wx):
@@ -289,8 +326,19 @@ class Platformer(Source):
         return 2 + (wx // 19) % 3
 
     def _gap(self, wx):
-        """Яма шириной 3 — редко, и никогда рядом с трубой."""
-        return wx > 40 and (wx // 43) % 4 == 3 and wx % 43 in (0, 1, 2)
+        """Яма шириной 3 — редко. 43 и 19 взаимно просты, поэтому труба
+        иногда попадает прямо на яму (475, 646, 817…); такую яму не ставим,
+        иначе герой упирался бы в трубу, стоя над пустотой. Не ставим её и
+        когда труба кончается за 4–8 столбцов до ямы: естественный прыжок
+        через трубу приземлял бы ровно в яму (1849, 2021, 2193 — перебор
+        состояний показал, что это ловушка с окном в пару столбцов). Труба
+        вплотную перед ямой или сразу за ней — честное препятствие."""
+        if not (wx > 40 and (wx // 43) % 4 == 3 and wx % 43 in (0, 1, 2)):
+            return False
+        base = wx - wx % 43
+        over = any(self._pipe_h(c) for c in range(base, base + 3))
+        trap = any(self._pipe_h(c) for c in range(base - 8, base - 3))
+        return not (over or trap)
 
     def _coin(self, wx):
         return wx > 12 and wx % 13 == 6
@@ -309,28 +357,69 @@ class Platformer(Source):
     def frame(self, t):
         dt = min(0.08, max(0.0, t - self.last))
         self.last = t
-        self.wx += self.speed * dt
-        wx0 = int(self.wx)
+        # Ручной режим — с первого реального нажатия; до него герой играет
+        # сам, так что с прошивкой без событий он не застынет у первой трубы.
+        keys = None if self.auto else self.keys
+        manual = keys is not None and getattr(keys, "total", 1) > 0
+        # нажатия снимаем каждый кадр: скопившиеся в полёте или на экране
+        # смерти не должны выстреливать «чужим» прыжком при приземлении
+        jump = bool(keys.take("KEY1")) if manual else False
 
-        # физика
-        on_ground = self.y <= 0.001
+        if self.dead_until:
+            if t < self.dead_until:
+                return self._dead_frame(t)
+            self.dead_until = 0.0
+            self._reset_run()
+
+        # горизонталь: мир едет, пока герой не упёрся носом в трубу
+        new_wx = self.wx + self.speed * dt
+        if self._blocked(int(new_wx) + self.HERO_X):
+            new_wx = self.wx           # упёрся; в auto герой прыгнет ещё раз
+        self.wx = new_wx
+        wx0 = int(self.wx)
+        hx = wx0 + self.HERO_X
+
+        # вертикаль
+        floor = self._floor(hx)
+        y_prev = self.y
+        on_ground = floor is not None and self.vy <= 0 and abs(self.y - floor) < 0.001
         if on_ground:
-            self.y = 0.0
+            self.y = float(floor)
             self.vy = 0.0
-            hx = wx0 + self.HERO_X
-            d = self._obstacle_ahead(hx)
-            if d:
-                need = self._pipe_h(hx + d)
-                self.vy = 16.0 if need >= 3 or self._gap(hx + d) else 14.0
+            if manual:
+                if jump:
+                    self.vy = 16.0
             else:
-                # монеты висят на высоте 5 — за ними тоже подпрыгиваем
-                for k in range(2, 6):
-                    if self._coin(hx + k) and (hx + k) not in self.taken:
-                        self.vy = 15.0
-                        break
+                d = self._obstacle_ahead(hx)
+                if d:
+                    need = self._pipe_h(hx + d)
+                    self.vy = 16.0 if need >= 3 or self._gap(hx + d) else 14.0
+                else:
+                    # монеты висят на высоте 5 — за ними тоже подпрыгиваем
+                    for k in range(2, 6):
+                        if self._coin(hx + k) and (hx + k) not in self.taken:
+                            self.vy = 15.0
+                            break
         else:
             self.vy -= 26.0 * dt
-        self.y = max(0.0, self.y + self.vy * dt)
+            if manual and self.vy > 10.2 and not keys.is_down("KEY1"):
+                self.vy = 10.2         # отпустил рано — прыжок короче, но
+                                       # самую низкую трубу (h=2) ещё берёт:
+                                       # sqrt(2*26*2) = 10.2
+            elif not manual and floor is None and self.vy < 0:
+                self.vy = 16.0         # автопилот не умирает: над ямой
+                                       # отталкивается от воздуха
+        self.y += self.vy * dt
+        # приземление только сверху: кто провалился ниже опоры, назад не
+        # выкарабкается — иначе герой цеплялся за дальний край ямы
+        if floor is not None and self.vy < 0 and y_prev >= floor - 1e-9 and self.y <= floor:
+            self.y = float(floor)
+            self.vy = 0.0
+        if self.y < -6.0:              # провалился в яму
+            self.runs += 1
+            self.best = max(self.best, self.coins)
+            self.dead_until = t + 1.5
+            return self._dead_frame(t)
 
         c = Canvas()
 

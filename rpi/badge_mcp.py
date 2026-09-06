@@ -91,6 +91,22 @@ class ShowTextInput(BaseModel):
 
 
 @mcp.tool(
+    name="badge_keys",
+    annotations={"title": "Кнопки бейджа", "readOnlyHint": True,
+                 "destructiveHint": False, "idempotentHint": True,
+                 "openWorldHint": True},
+)
+async def badge_keys() -> str:
+    """Что нажато на бейдже сейчас и последние события кнопок.
+
+    События приходят только в режиме стриминга (источник запущен) и только
+    с прошивкой, которая их шлёт: KEY1/KEY2, нажатие и отпускание с временем.
+    badge_exited=true значит, что человек вышел из стриминга долгим KEY2.
+    """
+    return await _call("GET", "/keys")
+
+
+@mcp.tool(
     name="badge_show_text",
     annotations={"title": "Показать текст", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": True,

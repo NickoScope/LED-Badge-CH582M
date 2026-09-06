@@ -196,3 +196,31 @@ def frames_ram_estimate(nframes):
     cols = nframes * COLS
     blocks = (cols + 7) // 8
     return blocks * ROWS + blocks * 8 * 2
+
+
+# --- события кнопок --------------------------------------------------------
+# Прошивка форка (ветка feat-button-events) во время стриминга шлёт по F056
+# два байта: 0xE0 <код>. KEY1 = 0x01, KEY2 = 0x02, старший бит = отпускание.
+# 0xE0 0x00 — бейдж вышел из стриминга сам (долгий KEY2), хост сбрасывает
+# состояние клавиш. Код возврата команды всегда однобайтовый — не спутать.
+EV_PREFIX = 0xE0
+EV_RELEASE = 0x80
+EV_EXIT = 0x00
+KEY_CODES = {0x01: "KEY1", 0x02: "KEY2"}
+
+
+def parse_notify(data):
+    """Уведомление с F056 -> словарь с полем type: status | key | exit | unknown."""
+    b = bytes(data)
+    if len(b) == 2 and b[0] == EV_PREFIX:
+        code = b[1]
+        if code == EV_EXIT:
+            return {"type": "exit"}
+        key = KEY_CODES.get(code & (0xFF ^ EV_RELEASE))
+        if key:
+            return {"type": "key", "key": key,
+                    "down": not (code & EV_RELEASE), "code": code}
+        return {"type": "unknown", "raw": b.hex()}
+    if len(b) == 1:
+        return {"type": "status", "code": b[0]}
+    return {"type": "unknown", "raw": b.hex()}

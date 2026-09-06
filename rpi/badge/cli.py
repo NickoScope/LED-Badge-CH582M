@@ -3,7 +3,9 @@ import argparse
 import asyncio
 import json
 import logging
+import statistics
 import sys
+import time
 
 from . import proto
 from .ble import Badge
@@ -59,6 +61,8 @@ async def cmd_stream(a):
     async with Badge(address=a.address, adapter=a.adapter, target_fps=a.fps) as b:
         await b.clear()
         await b.stream_enter()
+        src.keys = b.keys                 # ввод источнику: keys.take("KEY1") и т.д.
+        b.keys.on_exit = stop.set         # долгий KEY2 на бейдже — конец потока
         n = 0
 
         async def out(frame):
@@ -72,7 +76,64 @@ async def cmd_stream(a):
         except KeyboardInterrupt:
             pass
         finally:
-            await b.stream_leave()
+            if not b.keys.badge_exited:
+                await b.stream_leave()
+    return 0
+
+
+async def cmd_keys(a):
+    """Монитор кнопок: печатает фронты, зажигает половины панели в ответ.
+
+    Число в конце строки — хостовая часть круга: от прихода события до
+    записанного ответного кадра. Радиочасть (опрос кнопки 20 мс плюс
+    интервал соединения в обе стороны) сюда не входит, её видно только
+    по экрану.
+    """
+    stop = asyncio.Event()
+    import signal
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            asyncio.get_running_loop().add_signal_handler(sig, stop.set)
+        except NotImplementedError:
+            pass
+    lat = []
+    async with Badge(address=a.address, adapter=a.adapter) as b:
+        await b.clear()
+        await b.stream_enter()
+        print("жду события: KEY1 — левая половина, KEY2 — правая; "
+              "долгий KEY2 на бейдже — выход, Ctrl-C — тоже", file=sys.stderr)
+        t_prev = None
+        try:
+            while not stop.is_set():
+                try:
+                    t, key, down = await asyncio.wait_for(b.keys.queue.get(), 0.25)
+                except asyncio.TimeoutError:
+                    if b.keys.badge_exited:
+                        break
+                    continue
+                k1, k2 = b.keys.is_down("KEY1"), b.keys.is_down("KEY2")
+                cols = [0x07FF if (x < proto.COLS // 2 and k1) or
+                        (x >= proto.COLS // 2 and k2) else 0
+                        for x in range(proto.COLS)]
+                t0 = time.monotonic()
+                ok = await b.stream(cols, pace=False)
+                ms = (time.monotonic() - t0) * 1000
+                if ok:
+                    lat.append(ms)
+                gap = "" if t_prev is None else "  +%4.0f мс" % ((t - t_prev) * 1000)
+                t_prev = t
+                print("%s  %-4s %-9s%s   кадр в ответ за %.1f мс"
+                      % (time.strftime("%H:%M:%S"), key,
+                         "нажата" if down else "отпущена", gap, ms))
+            if b.keys.badge_exited:
+                print("бейдж вышел из стриминга сам (долгий KEY2)")
+        finally:
+            if lat:
+                print("хостовая часть круга, событие -> кадр записан: "
+                      "медиана %.1f мс, макс %.1f мс, n=%d"
+                      % (statistics.median(lat), max(lat), len(lat)), file=sys.stderr)
+            if b.connected and not b.keys.badge_exited:
+                await b.stream_leave()
     return 0
 
 
@@ -134,6 +195,9 @@ def main(argv=None):
     s.add_argument("--fps", type=float, default=30.0)
     s.add_argument("-o", "--opt", action="append", metavar="KEY=VALUE")
     s.set_defaults(fn=cmd_stream)
+
+    s = sub.add_parser("keys", help="события кнопок в стриминге: монитор и замер")
+    s.set_defaults(fn=cmd_keys)
 
     s = sub.add_parser("send", help="записать текст во флеш (нужен PIN)")
     s.add_argument("text")
