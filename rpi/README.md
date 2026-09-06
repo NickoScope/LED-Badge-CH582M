@@ -34,7 +34,9 @@ badgectl stream clock                     # часы потоком
 badgectl stream scroll -o text=ПРИВЕТ -o speed=2
 badgectl stream sysinfo                   # загрузка и температура Pi
 badgectl stream image -o path=anim.gif -o fps=12
-badgectl stream platformer                # бегущий человечек, трубы, монеты
+badgectl stream platformer                # платформер: прыжок по KEY1 на бейдже
+badgectl stream platformer -o auto=1      # он же без кнопок, играет сам
+badgectl keys                             # монитор кнопок: события, эхо на экран
 journalctl -f | badgectl stream stdin     # ЛЮБОЙ поток строк
 badgectl bright 2                         # яркость 0..3
 badgectl send "NICKO" --pin 1234          # ЗАПИСЬ ВО ФЛЕШ, играет без Pi
@@ -48,7 +50,8 @@ badgectl daemon --source clock            # демон с HTTP API
 Все остальные клиенты ходят сюда.
 
 ```bash
-curl localhost:8477/status
+curl localhost:8477/status                # ... "keys": что нажато сейчас
+curl localhost:8477/keys                  # последние события кнопок
 curl -X POST localhost:8477/text       -d '{"text":"ПРИВЕТ","scroll":true}'
 curl -X POST localhost:8477/clock      -d '{}'
 curl -X POST localhost:8477/source     -d '{"name":"sysinfo"}'
@@ -79,9 +82,9 @@ curl -X POST localhost:8477/clear
 }
 ```
 
-Десять инструментов: `badge_status`, `badge_show_text`, `badge_show_clock`,
+Одиннадцать инструментов: `badge_status`, `badge_show_text`, `badge_show_clock`,
 `badge_set_source`, `badge_send_frame`, `badge_set_brightness`, `badge_clear`,
-`badge_stop`, `badge_upload_text`, `badge_configure`.
+`badge_stop`, `badge_upload_text`, `badge_configure`, `badge_keys`.
 
 Работает и с `mcp` 1.x, и с 2.x: в версии 2 класс `FastMCP` переименован
 в `MCPServer`, импорт сделан с запасным вариантом.
@@ -144,6 +147,35 @@ SIGINT/SIGTERM уже есть.
 from badge.canvas import Canvas
 frame = Canvas().text("21:45", center=True).progress(0.5).frame()
 ```
+
+## Кнопки как события
+
+С прошивкой форка (ветка `feat-button-events`) бейдж в режиме стриминга
+отдаёт кнопки хосту: каждый фронт `KEY1`/`KEY2` приходит уведомлением на
+`F056` двумя байтами `E0 <код>` — `01`/`02` нажатие, `81`/`82` отпускание.
+Прошивка сообщает только физику; долгое, двойное, аккорд и автоповтор хост
+выводит сам. Одна комбинация остаётся бейджу: долгий `KEY2` выводит его из
+стриминга в меню и шлёт `E0 00` — чтобы без хоста не остаться в ловушке.
+
+Пакет подписывается на `F056` при соединении сам. Состояние — `badge.keys`
+(класс `Keys` в `badge/ble.py`), оно же подставляется источнику как `self.keys`:
+
+```python
+self.keys.take("KEY1")        # сколько раз нажали с прошлого кадра
+self.keys.is_down("KEY2")     # держат ли сейчас
+self.keys.held_for("KEY2")    # сколько секунд держат
+await self.keys.queue.get()   # ждать событие: (t, key, down)
+self.keys.badge_exited        # бейдж вышел сам (долгий KEY2)
+```
+
+Измерено 2026-09-06 на CH582M с Mac: 61 событие подряд без потерь, удержания
+от 90 мс, хостовая часть круга 0.1–0.3 мс. Длительности квантованы шагом
+~30 мс — интервал соединения BLE, событие приходит на ближайшем. Полный круг
+«кнопка → кадр на экране» по этой оценке 50–100 мс; прямо он не измерен.
+
+Без такой прошивки события просто не приходят, и это не ломает игры: до
+первого реального нажатия платформер играет сам, с первого — слушается
+кнопки. Явный `auto=1` оставляет автопилот навсегда.
 
 ## Своя графика, анимация и игры
 
