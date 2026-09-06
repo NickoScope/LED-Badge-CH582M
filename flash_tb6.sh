@@ -12,9 +12,24 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   if ! "$W" info 2>&1 | grep -q "No WCH ISP USB device found"; then
     echo "" | tee -a "$LOG"; echo ">>> ISP ПОЙМАН ($(date '+%H:%M:%S'))" | tee -a "$LOG"
     "$W" config reset 2>&1 | tail -2 | tee -a "$LOG"
-    "$W" flash "$BIN" 2>&1 | grep -E "Chip:|Erase|written|Verify|reset" | tee -a "$LOG"
-    echo "код возврата: $?" | tee -a "$LOG"
-    exit 0
+    # wchisp после "Device reset" может ждать ответа от чипа, который уже
+    # ушёл в прошивку, и не выходить никогда (см. CLAUDE.md). Сторож
+    # добивает его через 30 с; запись к этому моменту давно завершена,
+    # и лог это покажет. grep без буфера — чтобы строки шли сразу.
+    "$W" flash "$BIN" 2>&1 | grep --line-buffered -E "Chip:|Erase|written|Verify|reset|rror" | tee -a "$LOG" &
+    PIPE=$!
+    for _ in $(seq 1 100); do kill -0 "$PIPE" 2>/dev/null || break; sleep 0.3; done
+    if kill -0 "$PIPE" 2>/dev/null; then
+      pkill -TERM -f "wchisp flash" 2>/dev/null; sleep 1
+      pkill -KILL -f "wchisp flash" 2>/dev/null
+      echo "wchisp не вышел за 30 с и снят сторожем; итог ниже — только по строке wchisp" | tee -a "$LOG"
+    fi
+    wait "$PIPE" 2>/dev/null
+    # Судим строго по строке самого wchisp, чтобы никакой наш текст не совпал.
+    if grep -qE '\[INFO\] Verify OK' "$LOG"; then
+      echo "ПРОШИТО: верификация wchisp прошла" | tee -a "$LOG"; exit 0
+    fi
+    echo "верификации wchisp в логе НЕТ — прошивка не подтверждена, смотри $LOG" | tee -a "$LOG"; exit 2
   fi
   sleep 0.3
 done
