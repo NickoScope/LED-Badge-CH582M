@@ -352,7 +352,7 @@ namespace TCC: ни у системного, ни у brew-Python нет
 |---|---|---|
 | #152 | USB не поднимается после прошивки | подтверждение, наши 4 замера |
 | #190 | отключение SECURITY блокирует BLE-загрузку | issue |
-| #191 | `BadgeBLE.md` инвертирует `power_setting` | issue |
+| #191 | `BadgeBLE.md` инвертирует `power_setting` | issue; **PR #197** от Shikhar-Kesharwani 2026-09-07, сверен с `ngctrl.c` — верен |
 | #192 | потолок MTU: 4.7 fps и обрывы | issue, закрывается PR #194 |
 | #193 | пин `T` независимо от `J` и `K` | **PR** |
 | #194 | MTU 128 + `WRITE_NO_RSP` | **PR** |
